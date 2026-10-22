@@ -109,3 +109,13 @@ jobs:
             git pull --rebase
           done
           exit 1
+
+      # Solo «toca el timbre»: el servidor lee él mismo resultado.json y decide el aviso.
+      - name: Avisar al servidor
+        if: ${{ always() && !inputs.solo_descargar }}
+        env:
+          ENRUTA_URL: ${{ vars.ENRUTA_URL }}
+        run: |
+          TOKEN=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=enruta" | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')
+          echo "::add-mask::$TOKEN"
+          curl -sS -X POST -H "Authorization: Bearer $TOKEN" -H "x-enruta: 1" "$ENRUTA_URL/api/push/notify" || echo "No se pudo avisar al servidor"
