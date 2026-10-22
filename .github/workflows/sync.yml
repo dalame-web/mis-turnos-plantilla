@@ -1,7 +1,111 @@
-name: Prueba
-on: workflow_dispatch
+name: Sincronizar turnos
+
+# Corto y sin programa: el motor se descarga del servidor de EnRuta en cada ejecución, con el
+# «DNI firmado por GitHub» (OIDC). Si este repo no está autorizado, el servidor no lo da.
+# Sin horario de GitHub: lo lanza el servidor (Vercel) o la app.
+on:
+  workflow_dispatch:
+    inputs:
+      revision_completa:
+        description: "Revisión completa del año (1/1–31/12)"
+        type: boolean
+        default: false
+      solo_descargar:
+        description: "Solo comprobar que se descarga el motor (no entra en IVU)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # subir turnos.db, turnos.ics y resultado.json
+  id-token: write   # identificarse ante el servidor (OIDC)
+
+concurrency:
+  group: sync
+  cancel-in-progress: false
+
 jobs:
-  hola:
+  sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - run: echo "hola"
+      - uses: actions/checkout@v5
+
+      - name: Descargar el motor de EnRuta
+        env:
+          ENRUTA_URL: ${{ vars.ENRUTA_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "$ENRUTA_URL" ]; then echo "::error::Falta la variable ENRUTA_URL"; exit 1; fi
+          TOKEN=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=enruta" | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')
+          echo "::add-mask::$TOKEN"
+          # Datos del token (sin la firma), para el registro de esta ejecución.
+          python3 - "$TOKEN" <<'PY'
+          import base64, json, sys
+          p = sys.argv[1].split('.')[1]
+          c = json.loads(base64.urlsafe_b64decode(p + '=' * (-len(p) % 4)))
+          campos = ('repository', 'repository_id', 'repository_owner_id', 'workflow_ref', 'job_workflow_ref', 'ref', 'event_name', 'aud')
+          print(json.dumps({k: c.get(k) for k in campos}, indent=1))
+          PY
+          code=$(curl -sS -o motor.json -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$ENRUTA_URL/api/motor")
+          if [ "$code" != 200 ]; then echo "::error::El servidor no ha dado el motor (HTTP $code): $(cat motor.json)"; exit 1; fi
+          python3 - <<'PY'
+          import base64, json, os
+          d = json.load(open('motor.json'))
+          os.makedirs('motor', exist_ok=True)
+          for nombre, contenido in d['archivos'].items():
+              if '/' in nombre or '\\' in nombre or nombre.startswith('.'):
+                  raise SystemExit(f'Nombre de archivo no válido: {nombre}')
+              with open(os.path.join('motor', nombre), 'wb') as f:
+                  f.write(base64.b64decode(contenido))
+          print(f"Motor {d['version']} · {len(d['archivos'])} archivos")
+          PY
+          rm motor.json
+
+      - uses: actions/setup-python@v6
+        if: ${{ !inputs.solo_descargar }}
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: |
+            motor/requirements.txt
+            motor/constraints.txt
+
+      - name: Instalar dependencias
+        if: ${{ !inputs.solo_descargar }}
+        run: pip install -r motor/requirements.txt -c motor/constraints.txt
+
+      - name: Preparar configuración opcional
+        if: ${{ !inputs.solo_descargar }}
+        env:
+          DATA_CONFIG_YAML: ${{ secrets.DATA_CONFIG_YAML }}
+        run: |
+          mkdir -p data
+          if [ -n "$DATA_CONFIG_YAML" ]; then printf '%s\n' "$DATA_CONFIG_YAML" > data/config.yaml; fi
+
+      - name: Sincronizar con IVU
+        if: ${{ !inputs.solo_descargar }}
+        env:
+          IVU_USERNAME: ${{ secrets.IVU_USERNAME }}
+          IVU_PASSWORD: ${{ secrets.IVU_PASSWORD }}
+          IVU_FULL_YEAR: ${{ inputs.revision_completa && '1' || '' }}
+        run: python motor/main.py
+
+      - name: Guardar resultados en el repo
+        if: ${{ always() && !inputs.solo_descargar }}
+        run: |
+          git config user.name "EnRuta Bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for f in turnos.db turnos.ics resultado.json; do
+            if [ -f "$f" ]; then git add -f "$f"; fi
+          done
+          if git diff --staged --quiet; then
+            echo "Sin cambios que guardar"
+            exit 0
+          fi
+          git commit -m "sync: $(date -u '+%Y-%m-%d %H:%M UTC')"
+          for intento in 1 2 3; do
+            if git push; then exit 0; fi
+            echo "El repo cambió mientras tanto; reintento $intento"
+            git pull --rebase
+          done
+          exit 1
