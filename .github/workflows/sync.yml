@@ -14,9 +14,13 @@ on:
         description: "Solo comprobar que se descarga el motor (no entra en IVU)"
         type: boolean
         default: false
+      whatsapp_prueba:
+        description: "Solo mandar el WhatsApp de prueba a tus familiares (no entra en IVU)"
+        type: boolean
+        default: false
 
 permissions:
-  contents: write   # subir turnos.db, turnos.ics y resultado.json
+  contents: write   # subir turnos.db, turnos.ics, turnos.json y resultado.json
   id-token: write   # identificarse ante el servidor (OIDC)
 
 concurrency:
@@ -82,20 +86,25 @@ jobs:
           mkdir -p data
           if [ -n "$DATA_CONFIG_YAML" ]; then printf '%s\n' "$DATA_CONFIG_YAML" > data/config.yaml; fi
 
+      - name: Mensaje de prueba de WhatsApp
+        if: ${{ inputs.whatsapp_prueba && !inputs.solo_descargar }}
+        run: python motor/whatsapp_prueba.py
+
       - name: Sincronizar con IVU
-        if: ${{ !inputs.solo_descargar }}
+        if: ${{ !inputs.solo_descargar && !inputs.whatsapp_prueba }}
         env:
           IVU_USERNAME: ${{ secrets.IVU_USERNAME }}
           IVU_PASSWORD: ${{ secrets.IVU_PASSWORD }}
           IVU_FULL_YEAR: ${{ inputs.revision_completa && '1' || '' }}
         run: python motor/main.py
 
+      # !cancelled() y no always(): si se cancela la sincronización, no se sube nada a medias (paso 4.7, D23).
       - name: Guardar resultados en el repo
-        if: ${{ always() && !inputs.solo_descargar }}
+        if: ${{ !cancelled() && !inputs.solo_descargar && !inputs.whatsapp_prueba }}
         run: |
           git config user.name "EnRuta Bot"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          for f in turnos.db turnos.ics resultado.json; do
+          for f in turnos.db turnos.ics turnos.json resultado.json; do
             if [ -f "$f" ]; then git add -f "$f"; fi
           done
           if git diff --staged --quiet; then
@@ -112,7 +121,7 @@ jobs:
 
       # Solo «toca el timbre»: el servidor lee él mismo resultado.json y decide el aviso.
       - name: Avisar al servidor
-        if: ${{ always() && !inputs.solo_descargar }}
+        if: ${{ !cancelled() && !inputs.solo_descargar && !inputs.whatsapp_prueba }}
         env:
           ENRUTA_URL: ${{ vars.ENRUTA_URL }}
         run: |
