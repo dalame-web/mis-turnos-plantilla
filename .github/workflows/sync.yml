@@ -30,7 +30,7 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20  # año completo ~14 min + hasta ~4 min de reintentos al guardar (F141)
     steps:
       - uses: actions/checkout@v5
 
@@ -112,11 +112,14 @@ jobs:
             exit 0
           fi
           git commit -m "sync: $(date -u '+%Y-%m-%d %H:%M UTC')"
-          for intento in 1 2 3; do
+          # GitHub a veces falla un momento (error 500 al subir): 5 intentos con espera creciente en vez de 3 seguidos.
+          for espera in 0 10 30 60 120; do
+            sleep "$espera"
             if git push; then exit 0; fi
-            echo "El repo cambió mientras tanto; reintento $intento"
-            git pull --rebase
+            echo "No se pudo subir (el repo cambió o GitHub falló un momento); reintento tras esperar"
+            git pull --rebase || true
           done
+          echo "::error::GitHub no dejó subir los turnos tras 5 intentos. No es culpa tuya: vuelve a pulsar «Sincronizar ahora» en un rato."
           exit 1
 
       # Solo «toca el timbre»: el servidor lee él mismo resultado.json y decide el aviso.
