@@ -36,7 +36,7 @@ jobs:
 
       - name: Descargar el motor de EnRuta
         env:
-          ENRUTA_URL: ${{ vars.ENRUTA_URL }}
+          ENRUTA_URL: ${{ github.ref_name == 'pruebas' && vars.ENRUTA_URL_PRUEBAS || vars.ENRUTA_URL }}  # rama pruebas → zona de pruebas (D148)
         run: |
           set -euo pipefail
           if [ -z "$ENRUTA_URL" ]; then echo "::error::Falta la variable ENRUTA_URL"; exit 1; fi
@@ -79,7 +79,8 @@ jobs:
         run: pip install -r motor/requirements.txt -c motor/constraints.txt
 
       - name: Preparar configuración opcional
-        if: ${{ !inputs.solo_descargar }}
+        # En la rama pruebas, sin WhatsApp a los familiares: los avisos de una prueba solo te llegan a ti (D148).
+        if: ${{ !inputs.solo_descargar && github.ref_name != 'pruebas' }}
         env:
           DATA_CONFIG_YAML: ${{ secrets.DATA_CONFIG_YAML }}
         run: |
@@ -126,7 +127,7 @@ jobs:
       - name: Avisar al servidor
         if: ${{ !cancelled() && !inputs.solo_descargar && !inputs.whatsapp_prueba }}
         env:
-          ENRUTA_URL: ${{ vars.ENRUTA_URL }}
+          ENRUTA_URL: ${{ github.ref_name == 'pruebas' && vars.ENRUTA_URL_PRUEBAS || vars.ENRUTA_URL }}  # rama pruebas → zona de pruebas (D148)
         run: |
           TOKEN=$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=enruta" | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')
           echo "::add-mask::$TOKEN"
